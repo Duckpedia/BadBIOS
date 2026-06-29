@@ -7,7 +7,11 @@ F1 = 19500
 BIT_DURATION = 0.1
 AMPLITUDE = 0.5
 
-PREAMBLE = [1, 0] * 8
+PREAMBLE = [
+    1, 1, 1, 0, 0, 1, 0, 1,
+    0, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 1, 1, 1, 0, 0, 0,
+]
 
 
 def text_to_bits(text: str) -> list[int]:

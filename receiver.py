@@ -8,9 +8,15 @@ F1 = 19500
 BIT_DURATION = 0.1
 FREQ_TOLERANCE = 300
 
-PREAMBLE = [1, 0] * 8
+PREAMBLE = [
+    1, 1, 1, 0, 0, 1, 0, 1,
+    0, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 1, 1, 1, 0, 0, 0,
+]
 
 CHUNK = int(SAMPLE_RATE * BIT_DURATION)
+READ_CHUNK = CHUNK // 4
+PREAMBLE_THRESHOLD = 0.95
 
 
 def dominant_freq(chunk: np.ndarray, sample_rate: int) -> float:
@@ -18,6 +24,63 @@ def dominant_freq(chunk: np.ndarray, sample_rate: int) -> float:
     spectrum = np.abs(rfft(chunk * window))
     freqs = rfftfreq(len(chunk), 1 / sample_rate)
     return freqs[np.argmax(spectrum)]
+
+
+def classify_bit(chunk: np.ndarray) -> tuple[int | None, float]:
+    window = np.hanning(len(chunk))
+    spectrum = np.abs(rfft(chunk * window))
+    freqs = rfftfreq(len(chunk), 1 / SAMPLE_RATE)
+
+    f0_energy = spectrum[np.argmin(np.abs(freqs - F0))]
+    f1_energy = spectrum[np.argmin(np.abs(freqs - F1))]
+
+    if max(f0_energy, f1_energy) == 0:
+        return None, 0.0
+
+    bit = 1 if f1_energy > f0_energy else 0
+    confidence = abs(f1_energy - f0_energy) / max(f0_energy, f1_energy)
+
+    if confidence < 0.25:
+        return None, confidence
+
+    return bit, confidence
+
+
+def preamble_match_score(samples: np.ndarray) -> float:
+    matches = 0
+
+    for index, expected_bit in enumerate(PREAMBLE):
+        start = index * CHUNK
+        end = start + CHUNK
+        bit, _ = classify_bit(samples[start:end])
+
+        if bit == expected_bit:
+            matches += 1
+
+    return matches / len(PREAMBLE)
+
+
+def find_preamble(samples: np.ndarray) -> int | None:
+    preamble_samples = len(PREAMBLE) * CHUNK
+
+    if len(samples) < preamble_samples:
+        return None
+
+    best_offset = None
+    best_score = 0.0
+    max_offset = len(samples) - preamble_samples
+
+    for offset in range(0, max_offset + 1, READ_CHUNK // 4):
+        score = preamble_match_score(samples[offset : offset + preamble_samples])
+
+        if score > best_score:
+            best_score = score
+            best_offset = offset
+
+    if best_score >= PREAMBLE_THRESHOLD:
+        return best_offset
+
+    return None
 
 
 def bits_to_text(bits):
@@ -46,27 +109,28 @@ def receive(num_bits):
         channels=1,
         rate=SAMPLE_RATE,
         input=True,
-        frames_per_buffer=CHUNK,
+        frames_per_buffer=READ_CHUNK,
     )
 
     print("Waiting for preamble...")
 
-    bits = []
+    preamble_samples = len(PREAMBLE) * CHUNK
+    max_buffer_samples = preamble_samples + CHUNK
+    buffer = np.array([], dtype=np.float32)
+    pending = np.array([], dtype=np.float32)
 
     while True:
-        raw = stream.read(CHUNK, exception_on_overflow=False)
+        raw = stream.read(READ_CHUNK, exception_on_overflow=False)
         chunk = np.frombuffer(raw, dtype=np.float32)
+        buffer = np.concatenate((buffer, chunk))
 
-        bit = detect_bit(dominant_freq(chunk, SAMPLE_RATE))
-        if bit is None:
-            continue
+        if len(buffer) > max_buffer_samples:
+            buffer = buffer[-max_buffer_samples:]
 
-        bits.append(bit)
-
-        if len(bits) > len(PREAMBLE):
-            bits.pop(0)
-
-        if bits == PREAMBLE:
+        preamble_offset = find_preamble(buffer)
+        if preamble_offset is not None:
+            payload_start = preamble_offset + preamble_samples
+            pending = buffer[payload_start:]
             print("Preamble detected!")
             break
 
@@ -75,13 +139,20 @@ def receive(num_bits):
     message_bits = []
 
     while len(message_bits) < num_bits:
-        raw = stream.read(CHUNK, exception_on_overflow=False)
-        chunk = np.frombuffer(raw, dtype=np.float32)
+        while len(pending) < CHUNK:
+            raw = stream.read(READ_CHUNK, exception_on_overflow=False)
+            chunk = np.frombuffer(raw, dtype=np.float32)
+            pending = np.concatenate((pending, chunk))
 
-        bit = detect_bit(dominant_freq(chunk, SAMPLE_RATE))
+        bit_chunk = pending[:CHUNK]
+        pending = pending[CHUNK:]
 
-        if bit is not None:
-            message_bits.append(bit)
+        bit, _ = classify_bit(bit_chunk)
+
+        if bit is None:
+            bit = detect_bit(dominant_freq(bit_chunk, SAMPLE_RATE))
+
+        message_bits.append(0 if bit is None else bit)
 
     stream.stop_stream()
     stream.close()
