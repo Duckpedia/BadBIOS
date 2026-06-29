@@ -7,12 +7,6 @@ F1 = 19500
 BIT_DURATION = 0.1
 AMPLITUDE = 0.5
 
-PREAMBLE = [
-    1, 1, 1, 0, 0, 1, 0, 1,
-    0, 0, 0, 1, 0, 1, 1, 0,
-    1, 0, 1, 1, 1, 0, 0, 0,
-]
-
 
 def text_to_bits(text: str) -> list[int]:
     bits = []
@@ -30,7 +24,8 @@ def generate_tone(freq: float, duration: float, sample_rate: int) -> np.ndarray:
 
 
 def transmit(message: str):
-    payload = text_to_bits(message)
+    bits = text_to_bits(message)
+    print(f"Transmitting {len(bits)} bits: {message!r}")
 
     p = pyaudio.PyAudio()
     stream = p.open(
@@ -40,18 +35,7 @@ def transmit(message: str):
         output=True,
     )
 
-    print("Sending silence...")
-    silence = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32)
-    stream.write(silence.tobytes())
-
-    print("Sending preamble...")
-    for bit in PREAMBLE:
-        freq = F1 if bit else F0
-        tone = generate_tone(freq, BIT_DURATION, SAMPLE_RATE)
-        stream.write(tone.tobytes())
-
-    print(f"Sending message: {message!r}")
-    for bit in payload:
+    for bit in bits:
         freq = F1 if bit else F0
         tone = generate_tone(freq, BIT_DURATION, SAMPLE_RATE)
         stream.write(tone.tobytes())
